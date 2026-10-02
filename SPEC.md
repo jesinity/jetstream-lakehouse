@@ -1,10 +1,10 @@
-# Generic Python Jetstream v2 client: implementation specification
+# Jetstream Lakehouse: generic Python Jetstream v2 client specification
 
 Status: implementation brief for Luna. This repository currently contains a specification only. The first deliverable is a reusable **Jetstream client library**, with no Databricks, Kafka, Snowflake, or Spark dependency.
 
 ## Architecture decision
 
-Build one generic source library in this repository. Keep the existing Lakeflow connector in `../lakeflow-connect-bluesky` and build the Zerobus producer as a separate downstream application/package. Both should consume the same public Jetstream API once the library is tested and versioned. Do not implement either adapter here, and do not alter the existing Lakeflow connector or Databricks community-connector PR as part of this task. The current repository name, `jetstream-lakehouse`, does not dictate the Python import or distribution name; choose a generic name after checking availability and document that choice before publishing.
+Build one generic source library in this repository. Keep `jetstream-lakehouse` as the project and Python distribution name and `jetstream_lakehouse` as the import name. Those names do not require a Databricks dependency. Keep the existing Lakeflow connector in `../lakeflow-connect-bluesky` and build the Zerobus producer as a separate downstream application/package. Both should consume the same public Jetstream API once the library is tested and versioned. Do not implement either adapter here, and do not alter the existing Lakeflow connector or Databricks community-connector PR as part of this task.
 
 The library must support three source modes with one event model:
 
