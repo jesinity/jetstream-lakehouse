@@ -1,0 +1,125 @@
+name: Release
+
+on:
+  workflow_dispatch:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  checks:
+    uses: ./.github/workflows/ci.yml
+
+  build:
+    needs: checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: uv sync --locked
+      - name: Check release version
+        env:
+          RELEASE_EVENT: ${{ github.event_name }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          uv run python - <<'PY'
+          import os
+          import tomllib
+          from pathlib import Path
+          from jetstream_lakehouse import __version__
+
+          version = tomllib.loads(Path("pyproject.toml").read_text())["project"]["version"]
+          if __version__ != version:
+              raise SystemExit("Package and project versions disagree")
+          if os.environ["RELEASE_EVENT"] == "release":
+              if os.environ["RELEASE_TAG"] != f"v{version}":
+                  raise SystemExit("Release tag must match the package version")
+          PY
+      - run: uv build
+      - run: uvx twine check --strict dist/*
+      - name: Check wheel installation
+        run: |
+          uv venv /tmp/jetstream-wheel-check
+          uv pip install --python /tmp/jetstream-wheel-check/bin/python dist/*.whl
+          cd /tmp
+          /tmp/jetstream-wheel-check/bin/python -I -c 'from jetstream_lakehouse import Batch, Client, Config, Event; Client(Config())'
+      - uses: actions/upload-artifact@v4
+        with:
+          name: distributions
+          path: dist/
+          if-no-files-found: error
+
+  testpypi:
+    needs: build
+    runs-on: ubuntu-latest
+    environment: testpypi
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: distributions
+          path: dist/
+      - name: Publish to TestPyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          repository-url: https://test.pypi.org/legacy/
+          # Rehearsals may already have uploaded this version. The next job
+          # requires identical hashes before any production publication.
+          skip-existing: true
+
+  verify-testpypi:
+    needs: testpypi
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: distributions
+          path: dist/
+      - uses: astral-sh/setup-uv@v6
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Verify published hashes and download the TestPyPI wheel
+        run: python .github/scripts/verify_testpypi.py dist "$RUNNER_TEMP/testpypi-download"
+      - name: Install the published wheel in a clean environment
+        run: |
+          uv venv --python 3.12 "$RUNNER_TEMP/testpypi-install"
+          uv pip install --python "$RUNNER_TEMP/testpypi-install/bin/python" \
+            --index-url https://pypi.org/simple/ "$RUNNER_TEMP/testpypi-download/"*.whl
+          cd "$RUNNER_TEMP"
+          "$RUNNER_TEMP/testpypi-install/bin/python" -I - <<'PY'
+          from importlib.metadata import version
+          from jetstream_lakehouse import Batch, Client, Config, Event, __version__
+
+          assert __version__ == version("jetstream-lakehouse")
+          Client(Config())
+          assert Batch((), 0, 0).through_seq == 0
+          print(f"TestPyPI installation verified: jetstream-lakehouse {__version__}")
+          PY
+
+  pypi:
+    if: github.event_name == 'release'
+    needs: verify-testpypi
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: distributions
+          path: dist/
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
