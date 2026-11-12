@@ -1,6 +1,6 @@
 [project]
 name = "jetstream-lakehouse"
-version = "0.1.0"
+version = "0.2.0"
 description = "Destination-independent Jetstream v2 archive and live client"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -41,7 +41,7 @@ build-backend = "hatchling.build"
 packages = ["src/jetstream_lakehouse"]
 
 [tool.hatch.build.targets.sdist]
-include = ["/src", "/tests", "/README.md", "/RELEASING.md", "/LICENSE", "/NOTICE", "/pyproject.toml", "/uv.lock"]
+include = ["/src", "/tests", "/README.md", "/CHANGELOG.md", "/RELEASING.md", "/LICENSE", "/NOTICE", "/pyproject.toml", "/uv.lock"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

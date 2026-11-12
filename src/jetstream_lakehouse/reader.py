@@ -7,13 +7,12 @@ import re
 from typing import Any
 
 from .archive import segment_events
+from .archive_plan import MAX_PAGES, MAX_PLAN_BYTES, ArchivePlan, scope_fingerprint
 from .config import MAX_SEQ, Config, sequence
 from .errors import ProtocolError
 from .models import Batch, Event
 from .transport import Transport
 
-MAX_PLAN_BYTES = 2 * 1024 * 1024
-MAX_PAGES = 100
 _SEGMENT_NAME_RE = re.compile(r"seg_[0-9a-z]+\.jss")
 _CHECKSUM_RE = re.compile(r"[0-9a-f]{16}")
 
@@ -175,91 +174,123 @@ class Reader:
         No partial batch is returned on failure. An empty filtered batch may
         still advance the candidate cursor; the caller owns persistence.
         """
+        return self._read_window(after, through)
+
+    def plan_snapshot(self, after: int, through: int | None = None) -> ArchivePlan:
+        """Plan one bounded snapshot window without downloading archive segments."""
         sequence(after, "after_seq")
+        through = self._validate_window(after, through)
+        if through == after:
+            return ArchivePlan._create(after, after, scope_fingerprint(self.config), [])
+        with Transport(_transport_config(self.config)) as transport:
+            return self._plan_window(transport, after, through)
+
+    def read_plan(self, plan: ArchivePlan) -> Batch:
+        """Read exactly the recorded generations and windows without replanning."""
+        if type(plan) is not ArchivePlan:
+            raise ValueError("plan must be an ArchivePlan")
+        if plan._scope_fingerprint != scope_fingerprint(self.config):
+            raise ValueError("archive plan source scope does not match this client")
+        if plan.after_seq == plan.through_seq:
+            return Batch((), plan.after_seq, plan.through_seq)
+        with Transport(_transport_config(self.config)) as transport:
+            return self._execute_plan(transport, plan)
+
+    def _read_window(self, after: int, through: int | None) -> Batch:
+        """Run snapshot planning and decoding in one shared transport budget."""
+        sequence(after, "after_seq")
+        through = self._validate_window(after, through)
+        if through == after:
+            return Batch((), after, after)
+        with Transport(_transport_config(self.config)) as transport:
+            plan = self._plan_window(transport, after, through)
+            return self._execute_plan(transport, plan)
+
+    def _validate_window(self, after: int, through: int | None) -> int:
         if through is None:
             through = min(MAX_SEQ, after + self.config.max_sequence_span)
         sequence(through, "before_seq")
         if not after <= through <= min(MAX_SEQ, after + self.config.max_sequence_span):
             raise ValueError("through cursor exceeds configured sequence span")
+        return through
+
+    def _plan_window(self, transport: Transport, after: int, through: int) -> ArchivePlan:
         if through == after:
-            return Batch((), after, after)
+            return ArchivePlan._create(after, after, scope_fingerprint(self.config), [])
         pages: list[dict[str, Any]] = []
         covered = after
         pinned_tip: int | None = None
         cycle_end: int | None = None
         segment_generations: dict[str, str] = {}
-        with Transport(_transport_config(self.config)) as transport:
-            for _ in range(MAX_PAGES):
-                page = transport.plan(covered, cycle_end if cycle_end is not None else through)
-                tip = ArchiveValidator.sequence(page.get("sealedTipSeq"), "sealedTipSeq")
-                page_through = ArchiveValidator.sequence(
-                    page.get("plannedThroughSeq"), "plannedThroughSeq"
-                )
-                if tip > through:
-                    raise ProtocolError("Snapshot planner exceeded before_seq")
-                ArchiveValidator.validate_segments(page.get("segments"))
-                if pinned_tip is None:
-                    pinned_tip = tip
-                    if tip < after:
-                        # A cursor at or beyond today's sealed tip is ready for the live stream.
-                        if page_through != tip or page["segments"]:
-                            raise ProtocolError("Snapshot planner returned inconsistent bounds")
-                        return Batch((), after, after)
-                    cycle_end = min(through, tip)
-                if tip != pinned_tip or page_through < covered or page_through > cycle_end:
-                    raise ProtocolError("Snapshot planner returned inconsistent bounds")
-                for entry in page["segments"]:
-                    # Physical segments can extend beyond beforeSeq; selected rows are
-                    # clipped to the validated page window during decoding.
-                    previous_checksum = segment_generations.setdefault(
-                        entry["name"], entry["checksum"]
-                    )
-                    if previous_checksum != entry["checksum"]:
-                        raise ProtocolError("Snapshot plan mixed segment generations")
-                pages.append(
-                    {"after": covered, "through": page_through, "segments": page["segments"]}
-                )
-                if len(json.dumps(pages, separators=(",", ":"))) > MAX_PLAN_BYTES:
-                    raise ProtocolError(
-                        "Snapshot plan exceeds memory limit; reduce max_sequence_span"
-                    )
-                if page_through == cycle_end:
-                    break
-                if page_through == covered:
-                    raise ProtocolError("Snapshot planner made no progress")
-                covered = page_through
-            else:
-                raise ProtocolError("Snapshot planning exceeded page limit")
-            assert pinned_tip is not None and cycle_end is not None
-            candidate = cycle_end
-            if candidate < after or pages[-1]["through"] != candidate:
-                raise ProtocolError("Snapshot plan does not cover requested batch")
-            rows: list[Event] = []
-            size = 0
-            previous = after
-            for page in pages:
-                for entry in page["segments"]:
-                    for row in segment_events(
-                        transport,
-                        entry,
-                        page["after"],
-                        page["through"],
-                        self.config.include_raw_payload,
-                    ):
-                        transport.remaining()
-                        if row["seq"] <= previous:
-                            raise ProtocolError("Overlapping or out-of-order archive events")
-                        previous = row["seq"]
-                        if self.config.matches(row):
-                            event = Event.from_archive(row)
-                            size += len(json.dumps(row, separators=(",", ":")).encode())
-                            if size > self.config.max_batch_bytes:
-                                raise ProtocolError(
-                                    "Batch exceeds memory budget; reduce max_sequence_span"
-                                )
-                            rows.append(event)
-            transport.remaining()
-        return Batch(tuple(rows), after, candidate)
+        for _ in range(MAX_PAGES):
+            page = transport.plan(covered, cycle_end if cycle_end is not None else through)
+            tip = ArchiveValidator.sequence(page.get("sealedTipSeq"), "sealedTipSeq")
+            page_through = ArchiveValidator.sequence(
+                page.get("plannedThroughSeq"), "plannedThroughSeq"
+            )
+            if tip > through:
+                raise ProtocolError("Snapshot planner exceeded before_seq")
+            ArchiveValidator.validate_segments(page.get("segments"))
+            if pinned_tip is None:
+                pinned_tip = tip
+                if tip <= after:
+                    if page_through != tip or page["segments"]:
+                        raise ProtocolError("Snapshot planner returned inconsistent bounds")
+                    return ArchivePlan._create(after, after, scope_fingerprint(self.config), [])
+                cycle_end = min(through, tip)
+            if tip != pinned_tip or page_through < covered or page_through > cycle_end:
+                raise ProtocolError("Snapshot planner returned inconsistent bounds")
+            for entry in page["segments"]:
+                previous_checksum = segment_generations.setdefault(entry["name"], entry["checksum"])
+                if previous_checksum != entry["checksum"]:
+                    raise ProtocolError("Snapshot plan mixed segment generations")
+            pages.append(
+                {"afterSeq": covered, "throughSeq": page_through, "segments": page["segments"]}
+            )
+            if len(json.dumps(pages, separators=(",", ":")).encode("utf-8")) > MAX_PLAN_BYTES:
+                raise ProtocolError("Snapshot plan exceeds memory limit; reduce max_sequence_span")
+            if page_through == cycle_end:
+                break
+            if page_through == covered:
+                raise ProtocolError("Snapshot planner made no progress")
+            covered = page_through
+        else:
+            raise ProtocolError("Snapshot planning exceeded page limit")
+        assert pinned_tip is not None and cycle_end is not None
+        candidate = cycle_end
+        if candidate < after or pages[-1]["throughSeq"] != candidate:
+            raise ProtocolError("Snapshot plan does not cover requested batch")
+        transport.remaining()
+        plan = ArchivePlan._create(after, candidate, scope_fingerprint(self.config), pages)
+        plan.to_json()  # Enforce the serialized size limit, including format metadata.
+        return plan
+
+    def _execute_plan(self, transport: Transport, plan: ArchivePlan) -> Batch:
+        """Decode saved pages, enforcing integrity before returning any batch."""
+        rows: list[Event] = []
+        size = 0
+        previous = plan.after_seq
+        for page in plan._pages():
+            for entry in page["segments"]:
+                for row in segment_events(
+                    transport,
+                    entry,
+                    page["afterSeq"],
+                    page["throughSeq"],
+                    self.config.include_raw_payload,
+                ):
+                    transport.remaining()
+                    if row["seq"] <= previous:
+                        raise ProtocolError("Overlapping or out-of-order archive events")
+                    previous = row["seq"]
+                    if self.config.matches(row):
+                        event = Event.from_archive(row)
+                        size += len(json.dumps(row, separators=(",", ":")).encode())
+                        if size > self.config.max_batch_bytes:
+                            raise ProtocolError("Batch exceeds memory budget; reduce max_sequence_span")
+                        rows.append(event)
+        transport.remaining()
+        return Batch(tuple(rows), plan.after_seq, plan.through_seq)
 
 
 def _transport_config(config: Config) -> Any:

@@ -35,7 +35,7 @@ jobs:
           import os
           import tomllib
           from pathlib import Path
-          from jetstream_lakehouse import __version__
+          from jetstream_lakehouse import ArchivePlan, __version__
 
           version = tomllib.loads(Path("pyproject.toml").read_text())["project"]["version"]
           if __version__ != version:
@@ -101,10 +101,11 @@ jobs:
           cd "$RUNNER_TEMP"
           "$RUNNER_TEMP/testpypi-install/bin/python" -I - <<'PY'
           from importlib.metadata import version
-          from jetstream_lakehouse import Batch, Client, Config, Event, __version__
+          from jetstream_lakehouse import ArchivePlan, Batch, Client, Config, Event, __version__
 
           assert __version__ == version("jetstream-lakehouse")
           Client(Config())
+          assert callable(ArchivePlan.from_json)
           assert Batch((), 0, 0).through_seq == 0
           print(f"TestPyPI installation verified: jetstream-lakehouse {__version__}")
           PY

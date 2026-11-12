@@ -6,7 +6,7 @@ The archive decoder is adapted from the Apache-2.0 licensed Databricks Community
 
 ## Install
 
-After the first PyPI release, install with:
+Install the latest published version with:
 
 ```sh
 pip install jetstream-lakehouse
@@ -26,7 +26,7 @@ This package is a library and does not load configuration from environment varia
 ## Public API
 
 ```python
-from jetstream_lakehouse import Client, Config
+from jetstream_lakehouse import ArchivePlan, Client, Config
 from contextlib import closing
 
 config = Config(
@@ -43,6 +43,14 @@ batch = client.snapshot(after_seq=123456)
 for event in batch.events:
     process(event)
 print(batch.through_seq)  # candidate cursor, including valid zero-event windows
+
+# Discover once, then persist plans for bounded windows across processes.
+target = client.sealed_tip(after_seq=123456)
+if target > 123456:
+    before = min(target, 123456 + config.max_sequence_span)
+    plan_json = client.plan_snapshot(123456, before).to_json()
+    restored = ArchivePlan.from_json(plan_json)
+    batch = client.read_plan(restored)  # performs no planner requests
 
 # Explicit cursor resumes history; omit cursor only to follow from the current live tip.
 with closing(client.live(cursor=123456)) as stream:
@@ -64,6 +72,12 @@ with closing(client.replay(after_seq=123456)) as stream:
 Archive ranges are exclusive/inclusive: `(after_seq, through_seq]`. A returned `through_seq` means the complete range was validated, including when filters matched no events. It is only a candidate cursor; the caller persists it after its own destination confirms durability. If a write fails, resume from the caller's last saved cursor. This provides at-least-once delivery to the caller, not exactly-once persistence in an external system.
 
 `snapshot` requires an explicit `after_seq` and reads at most `max_sequence_span`. A window can start and end inside a physical segment. `replay` pins one sealed tip for the whole backfill, then connects live at that boundary. Segments sealed during backfill arrive through the server's cold replay. If live lookback expires, replay discovers a new archive boundary from its last yielded cursor; if the archive cannot bridge the gap yet, it raises `CursorTooOld` without skipping ahead.
+
+`sealed_tip(after_seq)` discovers the complete sealed boundary without downloading segments. It can return a value below the supplied cursor; the application chooses whether this means no backfill or a checkpoint recovery. Discovery never moves the cursor. A no-work case is `target <= checkpoint`, so no plan needs to be created. Plan bounded windows repeatedly toward the fixed target; the planner's `sealedTipSeq` can be clipped by each `before_seq` and is not the complete head.
+
+`plan_snapshot(after_seq, before_seq)` collects and validates every planner page without fetching segment bytes. Call `ArchivePlan.to_json()` to persist the exact page windows, checksums, and block selections, then restore with `ArchivePlan.from_json()` and pass it to `read_plan()`. Format version 1 is deterministic JSON; future supported readers will continue to read v1 plans or reject them explicitly if support is removed. The source-scope fingerprint binds the normalized endpoint and filters, but is not a signature. Tokens and operational settings are not serialized. Credentials may rotate and read time/byte limits may change; the destination client must still use the same source scope. Imported plans are bounded to the library's hard 1,000,000-sequence span and the current read byte/time limits still apply.
+
+Each separate planning or plan-reading call has its own refresh budget. `snapshot()` retains one shared budget for planning and reading. Batch byte accounting bounds serialized event rows; it is not a hard process-RSS limit because decoded objects and transport buffers add overhead. A saved plan has no live session or deadline. If a recorded segment generation changes or disappears, `read_plan()` raises `ArchiveChanged` and never replans automatically. Treat that as a failure needing caller intervention. In every mode, persist `through_seq` only after all returned events are durable.
 
 `live(cursor=None)` starts at the current live tip. Numeric cursors are sequences; live values at or above `10**15` are rejected because the server would interpret them as timestamps. Transient connection errors, timeouts, HTTP 429/5xx, and `ConsumerTooSlow` reconnect from the last yielded sequence, suppressing repeats. `max_retries` bounds consecutive failures and resets after forward event progress. Restart after a destination failure with the application's last saved cursor.
 
