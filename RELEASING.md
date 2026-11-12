@@ -32,10 +32,11 @@ by the repository plan, require a reviewer before production publication.
 See the official [pending publisher guide](https://docs.pypi.org/trusted-publishers/creating-a-project-through-oidc/)
 and [publishing guide](https://docs.pypi.org/trusted-publishers/using-a-publisher/).
 
-## First release and later updates
+## Release preparation and publication
 
-1. Set the same version in `pyproject.toml` and
-   `src/jetstream_lakehouse/__init__.py`, then run `uv lock`.
+1. Confirm the version is unused on PyPI and TestPyPI. Set it in
+   `pyproject.toml` and `src/jetstream_lakehouse/__init__.py`, update
+   `CHANGELOG.md`, then run `uv lock`.
 2. Commit the source, packaging files, and workflows. Merge them into the
    repository's default branch so GitHub exposes the manual workflow.
 3. In Actions → Release → Run workflow, select the intended release branch
@@ -48,7 +49,7 @@ and [publishing guide](https://docs.pypi.org/trusted-publishers/using-a-publishe
    It checks public imports, version consistency, and basic API construction.
    The manual run finishes without requesting production approval. You can
    also install the TestPyPI version to exercise your intended consumer.
-5. Create a `v0.1.0` tag (or the matching new version) at that verified commit,
+5. Create a matching `vX.Y.Z` tag at that verified commit,
    and publish a GitHub release for the tag. The workflow checks that the tag
    and both version declarations agree, runs CI, and repeats the TestPyPI
    publication and verification. Existing TestPyPI files are accepted only
@@ -59,7 +60,7 @@ and [publishing guide](https://docs.pypi.org/trusted-publishers/using-a-publishe
    checked against TestPyPI; it does not rebuild them in the publishing job.
 7. Verify installation of the exact released version from normal PyPI.
 
-TestPyPI and PyPI track versions independently, so `0.1.0` can be rehearsed on
+TestPyPI and PyPI track versions independently, so a version can be rehearsed on
 TestPyPI and then published on PyPI. Uploaded filenames cannot be overwritten;
 use a new version for changed artifacts. Keep the tagged source identical to
 the source rehearsed on TestPyPI. Both workflows build a wheel and source archive.

@@ -6,6 +6,7 @@ from collections.abc import Iterator
 from contextlib import closing
 from threading import Event as StopEvent
 
+from .archive_plan import ArchivePlan
 from .config import Config, sequence
 from .errors import CursorTooOld, ProtocolError
 from .live import iter_live, validate_stream_options
@@ -72,6 +73,35 @@ class Client:
         A cursor already at or beyond the sealed tip is returned unchanged.
         """
         return self._reader.read_batch(after_seq, before_seq)
+
+    def sealed_tip(self, after_seq: int) -> int:
+        """Discover the current sealed archive boundary without reading events.
+
+        The returned tip may be below ``after_seq``. The caller decides how to
+        handle that case; discovery never advances a saved cursor.
+        """
+        return self._reader.sealed_tip(after_seq)
+
+    def plan_snapshot(
+        self, after_seq: int, before_seq: int | None = None
+    ) -> ArchivePlan:
+        """Plan one bounded archive window without downloading segment data.
+
+        A saved plan can be persisted with :meth:`ArchivePlan.to_json` and read
+        by another client with the same source scope. ``before_seq`` is capped
+        by the sealed tip; call :meth:`sealed_tip` first to discover a larger
+        fixed run boundary. An empty plan has equal ``after_seq`` and
+        ``through_seq`` and requires no execution requests.
+        """
+        return self._reader.plan_snapshot(after_seq, before_seq)
+
+    def read_plan(self, plan: ArchivePlan) -> Batch:
+        """Read exactly a saved plan's segment generations without replanning.
+
+        Current client byte and timeout limits still apply. A changed or
+        unavailable generation raises ``ArchiveChanged`` for caller handling.
+        """
+        return self._reader.read_plan(plan)
 
     def live(
         self,
